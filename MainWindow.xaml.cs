@@ -6,7 +6,9 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace VideoCropper
@@ -18,7 +20,6 @@ namespace VideoCropper
 
         private string? _inputPath;
         private VideoInfo? _info;
-        private string? _currentFramePng;
 
         // Displayed-frame size in device-independent pixels (the canvas size).
         private double _dispW, _dispH;
@@ -32,6 +33,13 @@ namespace VideoCropper
         private CancellationTokenSource? _cts;
         private bool _isEncoding;
 
+        // Preview playback state.
+        private bool _mediaMode;        // true = native MediaElement; false = FFmpeg still-frame fallback
+        private bool _isPlaying;
+        private bool _suppressSeek;     // guards the timer's slider updates from re-seeking
+        private double _durationSec;
+        private readonly DispatcherTimer _playTimer;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -40,8 +48,8 @@ namespace VideoCropper
             FfmpegDirBox.Text = _settings.FfmpegDir;
             RefreshFfmpegService();
 
-            ScrubSlider.ValueChanged += (_, __) =>
-                ScrubTimeText.Text = FormatTime(ScrubSlider.Value);
+            _playTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _playTimer.Tick += PlayTimer_Tick;
         }
 
         // ===================== FFmpeg location =====================
@@ -74,12 +82,26 @@ namespace VideoCropper
             };
             if (dlg.ShowDialog() == true)
             {
-                _settings.FfmpegDir = dlg.FolderName;
+                string chosen = dlg.FolderName;
+
+                // Be forgiving: if they pointed at the ffmpeg root (not the bin folder),
+                // and the exes live in a "bin" subfolder, use that automatically.
+                if (!HasFfmpegExes(chosen))
+                {
+                    string binSub = Path.Combine(chosen, "bin");
+                    if (HasFfmpegExes(binSub)) chosen = binSub;
+                }
+
+                _settings.FfmpegDir = chosen;
                 _settings.Save();
                 FfmpegDirBox.Text = _settings.FfmpegDir;
                 RefreshFfmpegService();
             }
         }
+
+        private static bool HasFfmpegExes(string dir) =>
+            File.Exists(Path.Combine(dir, "ffmpeg.exe")) &&
+            File.Exists(Path.Combine(dir, "ffprobe.exe"));
 
         // ===================== Open / drag-drop =====================
 
@@ -123,19 +145,24 @@ namespace VideoCropper
             try
             {
                 StatusText.Text = "Reading video…";
+                StopPlayback();
                 _inputPath = path;
                 InputPathText.Text = path;
                 InputPathText.Foreground = System.Windows.Media.Brushes.White;
 
                 _info = await _ffmpeg.ProbeAsync(path);
+                _durationSec = _info.DurationSeconds;
 
-                // Scrub slider spans the duration.
-                ScrubSlider.Maximum = Math.Max(0.0, _info.DurationSeconds);
-                ScrubSlider.Value = 0;
-                ScrubSlider.IsEnabled = _info.DurationSeconds > 0;
-                ScrubTimeText.Text = FormatTime(0);
+                FitDisplayToFrame();
 
-                await LoadFrameAsync(0);
+                ScrubSlider.Maximum = Math.Max(0.001, _durationSec);
+                _suppressSeek = true; ScrubSlider.Value = 0; _suppressSeek = false;
+                ScrubSlider.IsEnabled = _durationSec > 0;
+                UpdateTimeText(0);
+
+                // Prefer fast native playback; MediaFailed flips us to FFmpeg stills.
+                TryStartMedia(path);
+
                 SuggestOutputPath();
                 StatusText.Text = "Ready";
             }
@@ -147,6 +174,37 @@ namespace VideoCropper
             }
         }
 
+        // Size the canvas (and both preview surfaces) to fit the available area while
+        // preserving the source aspect ratio. Source dims come from ffprobe (_info).
+        private void FitDisplayToFrame()
+        {
+            if (_info == null) return;
+
+            var host = (FrameworkElement)CropCanvas.Parent;
+            double availW = host.ActualWidth - 16;
+            double availH = host.ActualHeight - 16;
+            if (availW < 50) availW = 720;
+            if (availH < 50) availH = 480;
+
+            double ratio = Math.Min(availW / _info.Width, availH / _info.Height);
+            if (ratio <= 0 || double.IsInfinity(ratio)) ratio = 1.0;
+
+            _dispW = Math.Round(_info.Width * ratio);
+            _dispH = Math.Round(_info.Height * ratio);
+
+            CropCanvas.Width = _dispW;
+            CropCanvas.Height = _dispH;
+            PreviewImage.Width = _dispW;
+            PreviewImage.Height = _dispH;
+            PreviewMedia.Width = _dispW;
+            PreviewMedia.Height = _dispH;
+
+            PreviewHint.Visibility = Visibility.Collapsed;
+            ResetCropToFull();
+            ShowCropOverlay(true);
+        }
+
+        // FFmpeg still-frame fallback (used when native playback isn't available).
         private async Task LoadFrameAsync(double atSeconds)
         {
             if (_ffmpeg == null || _inputPath == null || _info == null) return;
@@ -165,40 +223,167 @@ namespace VideoCropper
             bmp.Freeze();
             try { File.Delete(png); } catch { /* temp; ignore */ }
 
-            bool first = _currentFramePng == null;
-            _currentFramePng = png;
-
             PreviewImage.Source = bmp;
+            PreviewImage.Visibility = Visibility.Visible;
             PreviewHint.Visibility = Visibility.Collapsed;
-
-            // Fit the frame into the available preview area (only (re)size on first load).
-            if (first || _dispW <= 0)
-            {
-                var host = (FrameworkElement)CropCanvas.Parent;
-                double availW = host.ActualWidth - 16;
-                double availH = host.ActualHeight - 16;
-                if (availW < 50) availW = 720;
-                if (availH < 50) availH = 480;
-
-                double ratio = Math.Min(availW / _info.Width, availH / _info.Height);
-                if (ratio <= 0 || double.IsInfinity(ratio)) ratio = 1.0;
-
-                _dispW = Math.Round(_info.Width * ratio);
-                _dispH = Math.Round(_info.Height * ratio);
-
-                CropCanvas.Width = _dispW;
-                CropCanvas.Height = _dispH;
-                PreviewImage.Width = _dispW;
-                PreviewImage.Height = _dispH;
-
-                ResetCropToFull();
-                ShowCropOverlay(true);
-            }
         }
 
         private void ScrubSlider_DragCompleted(object sender, DragCompletedEventArgs e)
         {
+            // In media mode the slider seeks live (ScrubSlider_ValueChanged); only the
+            // FFmpeg fallback needs to (re)extract a still on drag-completion.
+            if (_mediaMode) return;
             _ = LoadFrameAsync(ScrubSlider.Value);
+        }
+
+        // ===================== Native playback =====================
+
+        private void TryStartMedia(string path)
+        {
+            try
+            {
+                _mediaMode = true;
+                PreviewImage.Visibility = Visibility.Collapsed;
+                PreviewMedia.Visibility = Visibility.Visible;
+                PreviewMedia.Source = new Uri(path);
+                // PreviewMedia_MediaOpened renders the first frame and enables controls.
+            }
+            catch
+            {
+                FallbackToFrames();
+            }
+        }
+
+        private void PreviewMedia_MediaOpened(object sender, RoutedEventArgs e)
+        {
+            if (PreviewMedia.NaturalDuration.HasTimeSpan)
+            {
+                _durationSec = PreviewMedia.NaturalDuration.TimeSpan.TotalSeconds;
+                ScrubSlider.Maximum = Math.Max(0.001, _durationSec);
+                ScrubSlider.IsEnabled = _durationSec > 0;
+            }
+
+            // Render the first frame, then sit paused (ScrubbingEnabled keeps the frame visible).
+            PreviewMedia.Play();
+            PreviewMedia.Pause();
+            PreviewMedia.Position = TimeSpan.Zero;
+            _isPlaying = false;
+            _playTimer.Stop();
+
+            PlayPauseButton.IsEnabled = true;
+            StopButton.IsEnabled = true;
+            UpdatePlayIcon();
+            UpdateTimeText(0);
+        }
+
+        private void PreviewMedia_MediaEnded(object sender, RoutedEventArgs e)
+        {
+            PreviewMedia.Pause();
+            _isPlaying = false;
+            _playTimer.Stop();
+            _suppressSeek = true; ScrubSlider.Value = ScrubSlider.Maximum; _suppressSeek = false;
+            UpdateTimeText(_durationSec);
+            UpdatePlayIcon();
+        }
+
+        private void PreviewMedia_MediaFailed(object sender, ExceptionRoutedEventArgs e)
+        {
+            FallbackToFrames();
+        }
+
+        private void FallbackToFrames()
+        {
+            _mediaMode = false;
+            _isPlaying = false;
+            _playTimer.Stop();
+            try { PreviewMedia.Stop(); } catch { }
+            PreviewMedia.Source = null;
+            PreviewMedia.Visibility = Visibility.Collapsed;
+            PreviewImage.Visibility = Visibility.Visible;
+            PlayPauseButton.IsEnabled = false;
+            StopButton.IsEnabled = false;
+            UpdatePlayIcon();
+            StatusText.Text = "Native playback unavailable for this format — using FFmpeg frames.";
+            _ = LoadFrameAsync(ScrubSlider.Value);
+        }
+
+        private void StopPlayback()
+        {
+            _isPlaying = false;
+            _playTimer.Stop();
+            try { PreviewMedia.Stop(); } catch { }
+        }
+
+        private void PlayTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_mediaMode || !_isPlaying) return;
+            double pos = PreviewMedia.Position.TotalSeconds;
+            _suppressSeek = true;
+            ScrubSlider.Value = Math.Min(pos, ScrubSlider.Maximum);
+            _suppressSeek = false;
+            UpdateTimeText(pos);
+        }
+
+        private void PlayPause_Click(object sender, RoutedEventArgs e) => TogglePlay();
+
+        private void TogglePlay()
+        {
+            if (!_mediaMode) return;
+            if (_isPlaying)
+            {
+                PreviewMedia.Pause();
+                _isPlaying = false;
+                _playTimer.Stop();
+            }
+            else
+            {
+                PreviewMedia.Play();
+                _isPlaying = true;
+                _playTimer.Start();
+            }
+            UpdatePlayIcon();
+        }
+
+        private void Stop_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_mediaMode) return;
+            PreviewMedia.Pause();
+            PreviewMedia.Position = TimeSpan.Zero;
+            _isPlaying = false;
+            _playTimer.Stop();
+            _suppressSeek = true; ScrubSlider.Value = 0; _suppressSeek = false;
+            UpdateTimeText(0);
+            UpdatePlayIcon();
+        }
+
+        private void ScrubSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_suppressSeek) return;
+            if (_mediaMode)
+                PreviewMedia.Position = TimeSpan.FromSeconds(e.NewValue); // snappy; renders while paused
+            UpdateTimeText(e.NewValue);
+        }
+
+        private void UpdatePlayIcon()
+        {
+            if (PlayPauseButton != null)
+                PlayPauseButton.Content = _isPlaying ? "⏸" : "▶";
+        }
+
+        private void UpdateTimeText(double cur)
+        {
+            if (ScrubTimeText == null) return;
+            ScrubTimeText.Text = $"{FormatTime(cur)} / {FormatTime(_durationSec)}";
+        }
+
+        private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            // Space toggles playback, unless the user is typing in a text box.
+            if (e.Key == Key.Space && Keyboard.FocusedElement is not TextBox && _mediaMode)
+            {
+                TogglePlay();
+                e.Handled = true;
+            }
         }
 
         // ===================== Crop overlay =====================
@@ -562,6 +747,9 @@ namespace VideoCropper
         {
             if (_isEncoding) return;
             if (!Preflight(out string output)) return;
+
+            // Pause preview playback so it isn't competing with the encode.
+            if (_mediaMode && _isPlaying) TogglePlay();
 
             if (string.Equals(Path.GetFullPath(output), Path.GetFullPath(_inputPath!),
                     StringComparison.OrdinalIgnoreCase))

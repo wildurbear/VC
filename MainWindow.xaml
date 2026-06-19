@@ -4,6 +4,7 @@
         Title="Video Cropper" Height="760" Width="1100"
         MinHeight="600" MinWidth="900"
         AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
+        PreviewKeyDown="Window_PreviewKeyDown"
         Background="#FF2B2B2B" UseLayoutRounding="True">
 
     <Window.Resources>
@@ -90,7 +91,15 @@
                     <Grid Grid.Row="0">
                         <Canvas x:Name="CropCanvas" HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Background="Transparent" ClipToBounds="True">
-                            <Image x:Name="PreviewImage" Canvas.Left="0" Canvas.Top="0"/>
+                            <!-- Native playback (fast scrub + play/pause). Falls back to PreviewImage
+                                 when Windows can't decode the format. -->
+                            <MediaElement x:Name="PreviewMedia" Canvas.Left="0" Canvas.Top="0"
+                                          LoadedBehavior="Manual" UnloadedBehavior="Manual"
+                                          ScrubbingEnabled="True" Stretch="Fill" Visibility="Collapsed"
+                                          MediaOpened="PreviewMedia_MediaOpened"
+                                          MediaEnded="PreviewMedia_MediaEnded"
+                                          MediaFailed="PreviewMedia_MediaFailed"/>
+                            <Image x:Name="PreviewImage" Canvas.Left="0" Canvas.Top="0" Visibility="Collapsed"/>
 
                             <Rectangle x:Name="CropRect" Stroke="#FF4FA3FF" StrokeThickness="2"
                                        Fill="#224FA3FF" Visibility="Collapsed"/>
@@ -112,18 +121,24 @@
                                    Text="Video frame preview appears here."/>
                     </Grid>
 
-                    <!-- Scrub slider to re-grab the preview frame -->
+                    <!-- Playback + scrub bar -->
                     <Grid Grid.Row="1" Margin="8,6,8,8">
                         <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Frame:" Margin="0,0,8,0"/>
-                        <Slider x:Name="ScrubSlider" Grid.Column="1" Minimum="0" Maximum="1" Value="0"
-                                IsEnabled="False" Thumb.DragCompleted="ScrubSlider_DragCompleted"/>
-                        <TextBlock x:Name="ScrubTimeText" Grid.Column="2" Text="00:00.0" Margin="8,0,0,0"
-                                   Width="60" TextAlignment="Right"/>
+                        <Button x:Name="PlayPauseButton" Grid.Column="0" Content="▶" Width="34" Padding="0,3"
+                                IsEnabled="False" Click="PlayPause_Click" ToolTip="Play / Pause (Space)"/>
+                        <Button x:Name="StopButton" Grid.Column="1" Content="■" Width="34" Padding="0,3"
+                                IsEnabled="False" Click="Stop_Click" ToolTip="Stop"/>
+                        <Slider x:Name="ScrubSlider" Grid.Column="2" Minimum="0" Maximum="1" Value="0"
+                                Margin="6,0,0,0" VerticalAlignment="Center" IsEnabled="False"
+                                ValueChanged="ScrubSlider_ValueChanged"
+                                Thumb.DragCompleted="ScrubSlider_DragCompleted"/>
+                        <TextBlock x:Name="ScrubTimeText" Grid.Column="3" Text="00:00 / 00:00" Margin="8,0,0,0"
+                                   Width="110" TextAlignment="Right"/>
                     </Grid>
                 </Grid>
             </Border>
