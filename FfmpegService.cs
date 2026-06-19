@@ -95,7 +95,16 @@ namespace VideoCropper
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine(); // drain stderr so the pipe never fills and blocks ffmpeg
 
-            await proc.WaitForExitAsync(ct);
+            // If the caller cancels, actually stop FFmpeg (kill the whole tree) rather than
+            // just abandoning the await and leaving an orphaned encode running.
+            using (ct.Register(() =>
+            {
+                try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); }
+                catch { /* already gone */ }
+            }))
+            {
+                await proc.WaitForExitAsync(ct);
+            }
 
             if (proc.ExitCode != 0)
                 throw new Exception($"FFmpeg exited with code {proc.ExitCode}.");
