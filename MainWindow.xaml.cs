@@ -38,7 +38,9 @@ namespace VideoCropper
         private bool _isPlaying;
         private bool _suppressSeek;     // guards the timer's slider updates from re-seeking
         private double _durationSec;
-        private readonly DispatcherTimer _playTimer;
+        private readonly DispatcherTimer _playTimer;   // advances the slider during playback
+        private readonly DispatcherTimer _seekTimer;   // coalesces scrub seeks
+        private double? _pendingSeekSec;               // latest requested scrub target
 
         public MainWindow()
         {
@@ -50,6 +52,10 @@ namespace VideoCropper
 
             _playTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _playTimer.Tick += PlayTimer_Tick;
+
+            // Apply at most one seek per tick so a fast drag doesn't queue dozens of them.
+            _seekTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            _seekTimer.Tick += SeekTimer_Tick;
         }
 
         // ===================== FFmpeg location =====================
@@ -266,12 +272,17 @@ namespace VideoCropper
                 ScrubSlider.IsEnabled = _durationSec > 0;
             }
 
-            // Render the first frame, then sit paused (ScrubbingEnabled keeps the frame visible).
+            // Paused state: ScrubbingEnabled lets seeks render a frame. (It is turned OFF during
+            // actual playback — leaving it on makes the video freeze while audio plays.)
+            PreviewMedia.ScrubbingEnabled = true;
+            // Prime the pipeline so the first frame is visible and the first Play is responsive.
             PreviewMedia.Play();
             PreviewMedia.Pause();
             PreviewMedia.Position = TimeSpan.Zero;
             _isPlaying = false;
             _playTimer.Stop();
+            _pendingSeekSec = null;
+            _seekTimer.Start();
 
             PlayPauseButton.IsEnabled = true;
             StopButton.IsEnabled = true;
@@ -283,6 +294,7 @@ namespace VideoCropper
         private void PreviewMedia_MediaEnded(object sender, RoutedEventArgs e)
         {
             PreviewMedia.Pause();
+            PreviewMedia.ScrubbingEnabled = true; // back to paused-seek mode
             _isPlaying = false;
             _playTimer.Stop();
             _suppressSeek = true; ScrubSlider.Value = ScrubSlider.Maximum; _suppressSeek = false;
@@ -300,6 +312,8 @@ namespace VideoCropper
             _mediaMode = false;
             _isPlaying = false;
             _playTimer.Stop();
+            _seekTimer.Stop();
+            _pendingSeekSec = null;
             try { PreviewMedia.Stop(); } catch { }
             PreviewMedia.Source = null;
             PreviewMedia.Visibility = Visibility.Collapsed;
@@ -315,7 +329,17 @@ namespace VideoCropper
         {
             _isPlaying = false;
             _playTimer.Stop();
+            _seekTimer.Stop();
+            _pendingSeekSec = null;
             try { PreviewMedia.Stop(); } catch { }
+        }
+
+        // Apply only the most recent scrub target, at most once per tick.
+        private void SeekTimer_Tick(object? sender, EventArgs e)
+        {
+            if (!_mediaMode || _pendingSeekSec is not double target) return;
+            _pendingSeekSec = null;
+            PreviewMedia.Position = TimeSpan.FromSeconds(target);
         }
 
         private void PlayTimer_Tick(object? sender, EventArgs e)
@@ -336,11 +360,14 @@ namespace VideoCropper
             if (_isPlaying)
             {
                 PreviewMedia.Pause();
+                PreviewMedia.ScrubbingEnabled = true;  // re-enable paused-seek rendering
                 _isPlaying = false;
                 _playTimer.Stop();
             }
             else
             {
+                _pendingSeekSec = null;
+                PreviewMedia.ScrubbingEnabled = false; // OFF during playback or video freezes
                 PreviewMedia.Play();
                 _isPlaying = true;
                 _playTimer.Start();
@@ -352,9 +379,11 @@ namespace VideoCropper
         {
             if (!_mediaMode) return;
             PreviewMedia.Pause();
+            PreviewMedia.ScrubbingEnabled = true;
             PreviewMedia.Position = TimeSpan.Zero;
             _isPlaying = false;
             _playTimer.Stop();
+            _pendingSeekSec = null;
             _suppressSeek = true; ScrubSlider.Value = 0; _suppressSeek = false;
             UpdateTimeText(0);
             UpdatePlayIcon();
@@ -363,8 +392,9 @@ namespace VideoCropper
         private void ScrubSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_suppressSeek) return;
-            if (_mediaMode)
-                PreviewMedia.Position = TimeSpan.FromSeconds(e.NewValue); // snappy; renders while paused
+            // Coalesce: record the latest target; SeekTimer_Tick applies just one per tick so a
+            // fast drag stays responsive instead of backing up a queue of seeks.
+            if (_mediaMode) _pendingSeekSec = e.NewValue;
             UpdateTimeText(e.NewValue);
         }
 

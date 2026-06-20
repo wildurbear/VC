@@ -9,7 +9,7 @@
     <AssemblyName>VideoCropper</AssemblyName>
     <RootNamespace>VideoCropper</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <Product>Video Cropper</Product>
     <Description>Crop, resize, and re-encode video by driving a local FFmpeg install.</Description>
   </PropertyGroup>
