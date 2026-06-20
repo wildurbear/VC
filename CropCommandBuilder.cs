@@ -25,6 +25,11 @@ namespace VideoCropper
         public int? ScaleHeight { get; set; }
         public bool AspectLock { get; set; } = true; // false = allow abnormal stretch
 
+        // Trim / cut, in seconds from the start of the source. Null = no trim on that end,
+        // i.e. TrimStart null = from the beginning, TrimEnd null = to the end.
+        public double? TrimStart { get; set; }
+        public double? TrimEnd { get; set; }
+
         // Audio
         public AudioMode Audio { get; set; } = AudioMode.Keep;
         public double Volume { get; set; } = 1.0; // used when Audio == Volume (1.0 = unchanged)
@@ -40,11 +45,30 @@ namespace VideoCropper
         // Feed it straight into ProcessStartInfo.ArgumentList.
         public static List<string> Build(string inputPath, string outputPath, CropSettings s)
         {
-            var args = new List<string>
+            var args = new List<string> { "-y" }; // overwrite output
+
+            // ---- TRIM / CUT ----
+            // -ss before -i = fast, accurate seek when re-encoding (decodes from the nearest
+            // keyframe and discards up to the cut point). Express the end as -t DURATION so it
+            // stays unambiguous regardless of the input seek.
+            double start = Math.Max(0, s.TrimStart ?? 0);
+            if (start > 0)
             {
-                "-y",            // overwrite output; replace with a UI "file exists?" prompt if you prefer
-                "-i", inputPath,
-            };
+                args.Add("-ss");
+                args.Add(start.ToString("0.###", CultureInfo.InvariantCulture));
+            }
+
+            args.Add("-i");
+            args.Add(inputPath);
+
+            if (s.TrimEnd.HasValue)
+            {
+                double dur = s.TrimEnd.Value - start;
+                if (dur <= 0)
+                    throw new ArgumentException("Trim end must be after the trim start.");
+                args.Add("-t");
+                args.Add(dur.ToString("0.###", CultureInfo.InvariantCulture));
+            }
 
             string vf = BuildVideoFilter(s);
             if (vf.Length > 0)

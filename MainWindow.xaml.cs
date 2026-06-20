@@ -245,6 +245,9 @@ namespace VideoCropper
                 _mediaMode = true;
                 PreviewImage.Visibility = Visibility.Collapsed;
                 PreviewMedia.Visibility = Visibility.Visible;
+                StatusText.Text = "Opening preview…";
+                PlayPauseButton.IsEnabled = false;
+                StopButton.IsEnabled = false;
                 PreviewMedia.Source = new Uri(path);
                 // PreviewMedia_MediaOpened renders the first frame and enables controls.
             }
@@ -274,6 +277,7 @@ namespace VideoCropper
             StopButton.IsEnabled = true;
             UpdatePlayIcon();
             UpdateTimeText(0);
+            StatusText.Text = "Ready";
         }
 
         private void PreviewMedia_MediaEnded(object sender, RoutedEventArgs e)
@@ -691,6 +695,23 @@ namespace VideoCropper
             else if (AudioVolume.IsChecked == true) { s.Audio = AudioMode.Volume; s.Volume = VolumeSlider.Value; }
             else s.Audio = AudioMode.Keep;
 
+            // ---- Trim / cut ----
+            double? trimStart = ParseTime(TrimStartBox.Text);
+            double? trimEnd = ParseTime(TrimEndBox.Text);
+
+            if (!string.IsNullOrWhiteSpace(TrimStartBox.Text) && trimStart == null)
+                throw new ArgumentException("Trim start isn't a valid time. Use mm:ss.mmm or seconds.");
+            if (!string.IsNullOrWhiteSpace(TrimEndBox.Text) && trimEnd == null)
+                throw new ArgumentException("Trim end isn't a valid time. Use mm:ss.mmm or seconds.");
+
+            if (trimStart.HasValue && trimStart.Value >= _info.DurationSeconds)
+                throw new ArgumentException("Trim start is at or past the end of the video.");
+            if (trimStart.HasValue && trimEnd.HasValue && trimEnd.Value <= trimStart.Value)
+                throw new ArgumentException("Trim end must be after the trim start.");
+
+            s.TrimStart = trimStart;
+            s.TrimEnd = trimEnd;
+
             return s;
         }
 
@@ -760,17 +781,24 @@ namespace VideoCropper
             }
 
             System.Collections.Generic.List<string> args;
+            CropSettings settings;
             try
             {
-                args = CropCommandBuilder.Build(_inputPath!, output, BuildSettings());
+                settings = BuildSettings();
+                args = CropCommandBuilder.Build(_inputPath!, output, settings);
             }
             catch (Exception ex)
             {
-                // This is how odd-number / out-of-bounds builder errors reach the user.
+                // This is how odd-number / out-of-bounds / bad-trim builder errors reach the user.
                 MessageBox.Show(this, ex.Message, "Invalid settings",
                     MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
+
+            // Progress is measured against the (possibly trimmed) output duration.
+            double encStart = settings.TrimStart ?? 0;
+            double encEnd = settings.TrimEnd ?? _info!.DurationSeconds;
+            double encDuration = Math.Max(0.1, encEnd - encStart);
 
             try { Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!); } catch { }
 
@@ -784,7 +812,7 @@ namespace VideoCropper
 
             try
             {
-                await _ffmpeg!.RunWithProgressAsync(args, _info!.DurationSeconds, progress, _cts.Token);
+                await _ffmpeg!.RunWithProgressAsync(args, encDuration, progress, _cts.Token);
 
                 EncodeProgress.Value = 1;
                 StatusText.Text = "Done";
@@ -834,6 +862,47 @@ namespace VideoCropper
             CopyCmdButton.IsEnabled = !encoding;
         }
 
+        // ===================== Trim handlers =====================
+
+        private void TrimStartCurrent_Click(object sender, RoutedEventArgs e)
+        {
+            if (_info != null) TrimStartBox.Text = FormatTimePrecise(ScrubSlider.Value);
+        }
+
+        private void TrimEndCurrent_Click(object sender, RoutedEventArgs e)
+        {
+            if (_info != null) TrimEndBox.Text = FormatTimePrecise(ScrubSlider.Value);
+        }
+
+        private void TrimClear_Click(object sender, RoutedEventArgs e)
+        {
+            TrimStartBox.Text = "";
+            TrimEndBox.Text = "";
+        }
+
+        // Parse "ss.mmm", "mm:ss.mmm", or "hh:mm:ss.mmm" into seconds. null = blank/invalid.
+        private static double? ParseTime(string? text)
+        {
+            text = (text ?? "").Trim();
+            if (text.Length == 0) return null;
+
+            if (text.Contains(':'))
+            {
+                double total = 0;
+                foreach (var part in text.Split(':'))
+                {
+                    if (!double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out double v) || v < 0)
+                        return null;
+                    total = total * 60 + v;
+                }
+                return total;
+            }
+
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && s >= 0
+                ? s
+                : null;
+        }
+
         // ===================== helpers =====================
 
         private static string FormatTime(double seconds)
@@ -843,6 +912,16 @@ namespace VideoCropper
             return t.Hours > 0
                 ? $"{(int)t.TotalHours:0}:{t.Minutes:00}:{t.Seconds:00}"
                 : $"{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds / 100:0}";
+        }
+
+        // Millisecond precision, for trim fields.
+        private static string FormatTimePrecise(double seconds)
+        {
+            if (seconds < 0 || double.IsNaN(seconds)) seconds = 0;
+            var t = TimeSpan.FromSeconds(seconds);
+            return t.Hours > 0
+                ? $"{(int)t.TotalHours:0}:{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}"
+                : $"{t.Minutes:00}:{t.Seconds:00}.{t.Milliseconds:000}";
         }
     }
 }

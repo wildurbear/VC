@@ -171,6 +171,40 @@
                         </Grid>
                     </GroupBox>
 
+                    <!-- Trim / cut -->
+                    <GroupBox Header="Trim / cut (optional)">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Start:" Margin="0,0,6,4"/>
+                            <TextBox x:Name="TrimStartBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,4"/>
+                            <Button Grid.Row="0" Grid.Column="2" Content="Use current" Margin="6,0,0,4"
+                                    Click="TrimStartCurrent_Click"
+                                    ToolTip="Set start to the current preview position"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="End:" Margin="0,0,6,4"/>
+                            <TextBox x:Name="TrimEndBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,4"/>
+                            <Button Grid.Row="1" Grid.Column="2" Content="Use current" Margin="6,0,0,4"
+                                    Click="TrimEndCurrent_Click"
+                                    ToolTip="Set end to the current preview position"/>
+                            <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3"
+                                        Orientation="Horizontal" Margin="0,2,0,0">
+                                <Button Content="Clear" Click="TrimClear_Click"
+                                        ToolTip="Remove trim (encode the whole video)"/>
+                                <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" FontSize="11"
+                                           Foreground="#FF9A9A9A" TextWrapping="Wrap"
+                                           Text="mm:ss.mmm or seconds. Blank = start / end of video."/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+
                     <!-- Resize -->
                     <GroupBox Header="Resize output">
                         <StackPanel>
